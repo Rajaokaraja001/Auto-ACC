@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AUTOPILOT v3.8.0 - Cloud Edition (GitHub Actions)
-Shadow Hacker™ - Headless, stateless, relentless.
+AUTOPILOT v3.9.0 - Cloud Edition (Fixed Temp-Mail)
+Shadow Hacker™ - Adaptive, resilient, unstoppable.
 """
 
 import asyncio
 import os
 import re
 import sys
-import time
-import json
 from datetime import datetime
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright
 import logging
 
 logging.basicConfig(
@@ -24,7 +22,8 @@ logger = logging.getLogger("ShadowBot")
 
 class CloudAutomator:
     def __init__(self):
-        self.temp_mail_url = os.getenv('TEMP_MAIL_URL', 'https://temp-mail.org/')
+        # Use GuerrillaMail - much more stable
+        self.temp_mail_url = os.getenv('TEMP_MAIL_URL', 'https://www.guerrillamail.com/')
         self.target_url = os.getenv('TARGET_URL', 'https://app.reve.com/')
         self.target_name = os.getenv('TARGET_NAME', 'reve')
         self.temp_email = None
@@ -35,7 +34,6 @@ class CloudAutomator:
 
     async def run(self):
         async with async_playwright() as p:
-            # Headless chromium – optimized for GitHub runners
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -59,18 +57,24 @@ class CloudAutomator:
             page = await context.new_page()
             await self._screenshot(page, "start")
 
-            # --- 1. GET TEMP EMAIL ---
+            # --- 1. HARVEST TEMP EMAIL (GuerrillaMail specific) ---
             logger.info(f"🌐 Opening temp-mail: {self.temp_mail_url}")
             await page.goto(self.temp_mail_url, wait_until='networkidle', timeout=60000)
             await self._screenshot(page, "temp-mail-loaded")
 
-            # Scan visible text for email pattern
-            content = await page.content()
-            matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', content)
-            if matches:
-                self.temp_email = matches[0]
-            else:
-                # Click the 'copy' button if present, then read input
+            # Strategy 1: Look for the email address in visible text (GuerrillaMail shows it in a span)
+            email_element = await page.query_selector("#email")
+            if email_element:
+                self.temp_email = await email_element.text_content()
+                self.temp_email = self.temp_email.strip()
+            if not self.temp_email:
+                # Strategy 2: Scan all text for email pattern
+                content = await page.content()
+                matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', content)
+                if matches:
+                    self.temp_email = matches[0]
+            if not self.temp_email:
+                # Strategy 3: click the copy button (if exists) and read from input
                 copy_btn = await page.query_selector("button:has-text('copy'), button:has-text('Copy'), [aria-label*='copy']")
                 if copy_btn:
                     await copy_btn.click()
@@ -79,15 +83,26 @@ class CloudAutomator:
                     if email_input:
                         self.temp_email = await email_input.input_value()
             if not self.temp_email:
+                # Strategy 4: get from the iframe or any element with id 'email'
+                email_input = await page.query_selector("input#email")
+                if email_input:
+                    self.temp_email = await email_input.input_value()
+            if not self.temp_email:
                 raise RuntimeError("Failed to harvest temp email – check site structure.")
             logger.info(f"📧 Captured: {self.temp_email}")
 
-            # --- 2. TARGET SIGNUP ---
+            # --- 2. TARGET SIGNUP (same as before) ---
+            # ... (rest of the code unchanged; I'll include it below for completeness)
+
+            # [The rest of the script remains identical to the previous version,
+            #  but for brevity I'll include it fully here – you can just keep your old script
+            #  and only replace the email harvesting part. But I'll give the whole thing
+            #  to avoid any confusion.]
+
             logger.info(f"🎯 Navigating to target: {self.target_url}")
             await page.goto(self.target_url, wait_until='networkidle', timeout=60000)
             await self._screenshot(page, "target-loaded")
 
-            # Click "Start Creating" / CTA
             cta_found = False
             for sel in [
                 "button:has-text('Start Creating')",
@@ -109,11 +124,9 @@ class CloudAutomator:
             if not cta_found:
                 logger.warning("⚠️ No explicit CTA – may be direct form.")
 
-            # Wait for popup/form
             await asyncio.sleep(2)
             await self._screenshot(page, "before-fill")
 
-            # Fill fields
             email_field = await self._find_and_fill(page, "email", self.temp_email)
             if email_field:
                 await email_field.fill(self.temp_email)
@@ -126,13 +139,11 @@ class CloudAutomator:
             if pass_field:
                 await pass_field.fill("ShadowCloud#2026!")
 
-            # Submit
             submit_btn = await page.query_selector("button[type='submit'], button:has-text('Sign Up'), button:has-text('Create'), button:has-text('Continue')")
             if submit_btn and await submit_btn.is_visible():
                 await submit_btn.click()
                 logger.info("🚀 Form submitted.")
             else:
-                # Press Enter on any input
                 if pass_field:
                     await pass_field.press("Enter")
                 elif email_field:
@@ -143,12 +154,11 @@ class CloudAutomator:
             # --- 3. POLL TEMP-MAIL FOR VERIFICATION ---
             logger.info("⏳ Polling for verification email...")
             verification_found = False
-            for attempt in range(25):  # 25 * 6s = 150s
+            for attempt in range(25):
                 await asyncio.sleep(6)
                 await page.reload(wait_until='networkidle')
                 content = await page.content()
 
-                # Look for link containing target name or 'verify'
                 links = re.findall(r'href="(https?://[^"]*)"', content)
                 for link in links:
                     if self.target_name.lower() in link.lower() or 'verify' in link.lower() or 'confirm' in link.lower():
@@ -159,7 +169,6 @@ class CloudAutomator:
                 if verification_found:
                     break
 
-                # Look for numeric code
                 codes = re.findall(r'\b(\d{5,7})\b', content)
                 for code in codes:
                     if len(code) >= 5:
@@ -170,7 +179,6 @@ class CloudAutomator:
                 if verification_found:
                     break
 
-                # Context search
                 code_ctx = re.findall(r'code[:\s]+(\d{4,8})', content, re.IGNORECASE)
                 if code_ctx:
                     self.verification_code = code_ctx[0]
@@ -181,20 +189,17 @@ class CloudAutomator:
                 await self._screenshot(page, f"poll-{attempt}")
 
             if not verification_found:
-                logger.warning("⚠️ No verification found in plaintext – saving final state.")
+                logger.warning("⚠️ No verification found – saving final state.")
                 await self._screenshot(page, "final-state")
-                # Save page content for debugging
                 with open("final_page.html", "w", encoding="utf-8") as f:
                     f.write(await page.content())
 
-            # --- 4. APPLY VERIFICATION (if link found) ---
             if self.verification_link:
                 logger.info("🌐 Navigating to verification link...")
                 await page.goto(self.verification_link, wait_until='networkidle', timeout=60000)
                 await self._screenshot(page, "verified")
                 logger.info("✅ Verification completed successfully.")
             elif self.verification_code:
-                # Try to find code input on current page (may have redirected)
                 code_input = await self._find_field(page, "code")
                 if code_input:
                     await code_input.fill(self.verification_code)
@@ -211,7 +216,6 @@ class CloudAutomator:
             await browser.close()
 
     async def _find_and_fill(self, page, field_type, value):
-        """Find input by type/placeholder/aria and fill if exists."""
         base = f"input[type='{field_type}'], input[name*='{field_type}'], input[id*='{field_type}'], input[placeholder*='{field_type}']"
         try:
             el = await page.wait_for_selector(base, timeout=4000)
@@ -220,7 +224,6 @@ class CloudAutomator:
                 return el
         except:
             pass
-        # Fallback: all visible inputs
         all_inputs = await page.query_selector_all("input:visible")
         for inp in all_inputs:
             attrs = {
@@ -236,7 +239,6 @@ class CloudAutomator:
         return None
 
     async def _find_field(self, page, field_type):
-        """Just find without filling."""
         base = f"input[type='{field_type}'], input[name*='{field_type}'], input[id*='{field_type}'], input[placeholder*='{field_type}']"
         try:
             el = await page.wait_for_selector(base, timeout=2000)
@@ -245,7 +247,6 @@ class CloudAutomator:
             return None
 
     async def _screenshot(self, page, name):
-        """Take a timestamped screenshot for debugging."""
         try:
             timestamp = datetime.now().strftime("%H%M%S")
             filename = f"{self.screenshot_dir}/{name}_{timestamp}.png"
@@ -260,7 +261,6 @@ async def main():
         await bot.run()
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
-        # Still try to capture final state
         sys.exit(1)
 
 if __name__ == "__main__":
