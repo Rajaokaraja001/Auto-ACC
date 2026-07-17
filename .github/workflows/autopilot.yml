@@ -3,7 +3,7 @@ name: Shadow Autopilot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * *'   # optional daily run – remove if you want only manual
 
 jobs:
   run-automation:
@@ -26,14 +26,18 @@ jobs:
 
       - name: Run bot
         env:
-          TEMP_MAIL_URL: https://temp-mail.org/
+          TEMP_MAIL_URL: https://www.guerrillamail.com/
           TARGET_URL: https://app.reve.com/
           TARGET_NAME: reve
+          ACCOUNT_COUNT: 5   # 👈 Change this number to how many accounts you want
         run: python autopilot.py
 
-      - name: Upload screenshots
+      - name: Upload artifacts (screenshots + credentials)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-artifacts
-          path: screenshots/
+          name: accounts-and-screenshots
+          path: |
+            screenshots/
+            *.txt
+          retention-days: 3
