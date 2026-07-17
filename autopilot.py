@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AUTOPILOT v3.9.0 - Cloud Edition (Fixed Temp-Mail)
-Shadow Hacker™ - Adaptive, resilient, unstoppable.
+AUTOPILOT v4.0.0 - Multi-Account Forge
+Shadow Hacker™ - Infinite scalability, zero friction.
 """
 
 import asyncio
 import os
 import re
 import sys
+import random
+import string
 from datetime import datetime
 from playwright.async_api import async_playwright
 import logging
@@ -22,15 +24,141 @@ logger = logging.getLogger("ShadowBot")
 
 class CloudAutomator:
     def __init__(self):
-        # Use GuerrillaMail - much more stable
         self.temp_mail_url = os.getenv('TEMP_MAIL_URL', 'https://www.guerrillamail.com/')
         self.target_url = os.getenv('TARGET_URL', 'https://app.reve.com/')
         self.target_name = os.getenv('TARGET_NAME', 'reve')
-        self.temp_email = None
-        self.verification_code = None
-        self.verification_link = None
+        self.account_count = int(os.getenv('ACCOUNT_COUNT', '1'))  # Set this in workflow
+        self.credentials = []
         self.screenshot_dir = "screenshots"
         os.makedirs(self.screenshot_dir, exist_ok=True)
+
+    def generate_username(self):
+        """Generate a unique username for each account."""
+        return f"Butter_{random.randint(10000, 99999)}"
+
+    def generate_password(self, length=12):
+        """Generate a strong password."""
+        chars = string.ascii_letters + string.digits + "!@#$%^&*"
+        return ''.join(random.choice(chars) for _ in range(length))
+
+    async def harvest_temp_email(self, page):
+        """Get a fresh temp email from GuerrillaMail."""
+        await page.goto(self.temp_mail_url, wait_until='networkidle', timeout=60000)
+        # Wait for email to appear
+        for _ in range(10):
+            email_element = await page.query_selector("#email")
+            if email_element:
+                email = await email_element.text_content()
+                if email and '@' in email:
+                    return email.strip()
+            # Fallback regex
+            content = await page.content()
+            matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', content)
+            if matches:
+                return matches[0]
+            await asyncio.sleep(1)
+        raise RuntimeError("Could not harvest temp email")
+
+    async def run_account_creation(self, page, context, account_index):
+        """Create one account and return credentials."""
+        # 1. Get fresh temp email
+        temp_email = await self.harvest_temp_email(page)
+        username = self.generate_username()
+        password = self.generate_password()
+        logger.info(f"🆕 Account #{account_index}: {temp_email} | {username} | {password}")
+
+        # 2. Navigate to target signup
+        logger.info(f"🎯 Navigating to target: {self.target_url}")
+        await page.goto(self.target_url, wait_until='networkidle', timeout=60000)
+        await self._screenshot(page, f"target-{account_index}")
+
+        # Click "Start Creating" CTA
+        cta_found = False
+        for sel in [
+            "button:has-text('Start Creating')",
+            "button:has-text('Start')",
+            "button:has-text('Create Account')",
+            "button:has-text('Sign Up')",
+            "a:has-text('Start Creating')"
+        ]:
+            try:
+                btn = await page.wait_for_selector(sel, timeout=3000)
+                if btn and await btn.is_visible():
+                    await btn.click()
+                    cta_found = True
+                    logger.info("✅ CTA clicked.")
+                    break
+            except:
+                continue
+        await asyncio.sleep(2)
+
+        # Fill form
+        email_field = await self._find_and_fill(page, "email", temp_email)
+        if email_field:
+            await email_field.fill(temp_email)
+
+        name_field = await self._find_and_fill(page, "name", username)
+        if name_field:
+            await name_field.fill(username)
+
+        pass_field = await self._find_and_fill(page, "password", password)
+        if pass_field:
+            await pass_field.fill(password)
+
+        # Submit
+        submit_btn = await page.query_selector("button[type='submit'], button:has-text('Sign Up'), button:has-text('Create'), button:has-text('Continue')")
+        if submit_btn and await submit_btn.is_visible():
+            await submit_btn.click()
+        else:
+            if pass_field:
+                await pass_field.press("Enter")
+            elif email_field:
+                await email_field.press("Enter")
+
+        # 3. Poll for verification (now we need to check the same temp mail)
+        logger.info(f"⏳ Waiting for verification for account {account_index}...")
+        verification_found = False
+        for attempt in range(20):
+            await asyncio.sleep(5)
+            await page.reload(wait_until='networkidle')
+            content = await page.content()
+
+            # Look for link or code
+            links = re.findall(r'href="(https?://[^"]*)"', content)
+            for link in links:
+                if self.target_name.lower() in link.lower() or 'verify' in link.lower():
+                    # We have a link – navigate to it
+                    logger.info(f"🔗 Verification link found: {link[:100]}")
+                    await page.goto(link, wait_until='networkidle')
+                    verification_found = True
+                    break
+            if verification_found:
+                break
+
+            codes = re.findall(r'\b(\d{5,7})\b', content)
+            for code in codes:
+                if len(code) >= 5:
+                    # Try to find a code input on the target page (maybe we're redirected)
+                    code_input = await self._find_field(page, "code")
+                    if code_input:
+                        await code_input.fill(code)
+                        confirm = await page.query_selector("button:has-text('Verify'), button:has-text('Confirm')")
+                        if confirm:
+                            await confirm.click()
+                            verification_found = True
+                            break
+            if verification_found:
+                break
+        if not verification_found:
+            logger.warning(f"⚠️ Account {account_index} verification not completed.")
+
+        # Return credentials
+        return {
+            'email': temp_email,
+            'username': username,
+            'password': password,
+            'verified': verification_found
+        }
 
     async def run(self):
         async with async_playwright() as p:
@@ -55,166 +183,25 @@ class CloudAutomator:
             """)
 
             page = await context.new_page()
-            await self._screenshot(page, "start")
 
-            # --- 1. HARVEST TEMP EMAIL (GuerrillaMail specific) ---
-            logger.info(f"🌐 Opening temp-mail: {self.temp_mail_url}")
-            await page.goto(self.temp_mail_url, wait_until='networkidle', timeout=60000)
-            await self._screenshot(page, "temp-mail-loaded")
-
-            # Strategy 1: Look for the email address in visible text (GuerrillaMail shows it in a span)
-            email_element = await page.query_selector("#email")
-            if email_element:
-                self.temp_email = await email_element.text_content()
-                self.temp_email = self.temp_email.strip()
-            if not self.temp_email:
-                # Strategy 2: Scan all text for email pattern
-                content = await page.content()
-                matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', content)
-                if matches:
-                    self.temp_email = matches[0]
-            if not self.temp_email:
-                # Strategy 3: click the copy button (if exists) and read from input
-                copy_btn = await page.query_selector("button:has-text('copy'), button:has-text('Copy'), [aria-label*='copy']")
-                if copy_btn:
-                    await copy_btn.click()
-                    await asyncio.sleep(0.5)
-                    email_input = await page.query_selector("input[type='text'], input[type='email']")
-                    if email_input:
-                        self.temp_email = await email_input.input_value()
-            if not self.temp_email:
-                # Strategy 4: get from the iframe or any element with id 'email'
-                email_input = await page.query_selector("input#email")
-                if email_input:
-                    self.temp_email = await email_input.input_value()
-            if not self.temp_email:
-                raise RuntimeError("Failed to harvest temp email – check site structure.")
-            logger.info(f"📧 Captured: {self.temp_email}")
-
-            # --- 2. TARGET SIGNUP (same as before) ---
-            # ... (rest of the code unchanged; I'll include it below for completeness)
-
-            # [The rest of the script remains identical to the previous version,
-            #  but for brevity I'll include it fully here – you can just keep your old script
-            #  and only replace the email harvesting part. But I'll give the whole thing
-            #  to avoid any confusion.]
-
-            logger.info(f"🎯 Navigating to target: {self.target_url}")
-            await page.goto(self.target_url, wait_until='networkidle', timeout=60000)
-            await self._screenshot(page, "target-loaded")
-
-            cta_found = False
-            for sel in [
-                "button:has-text('Start Creating')",
-                "button:has-text('Start')",
-                "button:has-text('Create Account')",
-                "button:has-text('Sign Up')",
-                "a:has-text('Start Creating')"
-            ]:
+            # Loop for each account
+            for i in range(1, self.account_count + 1):
                 try:
-                    btn = await page.wait_for_selector(sel, timeout=3000)
-                    if btn and await btn.is_visible():
-                        await btn.click()
-                        cta_found = True
-                        logger.info("✅ Primary CTA clicked.")
-                        await self._screenshot(page, "cta-clicked")
-                        break
-                except:
-                    continue
-            if not cta_found:
-                logger.warning("⚠️ No explicit CTA – may be direct form.")
+                    creds = await self.run_account_creation(page, context, i)
+                    self.credentials.append(creds)
+                    # Save credentials to file after each success
+                    with open(f"{self.screenshot_dir}/credentials.txt", "a") as f:
+                        f.write(f"Account {i}: {creds['email']} | {creds['username']} | {creds['password']} | Verified: {creds['verified']}\n")
+                except Exception as e:
+                    logger.error(f"❌ Account {i} failed: {e}")
+                    # Continue to next
 
-            await asyncio.sleep(2)
-            await self._screenshot(page, "before-fill")
-
-            email_field = await self._find_and_fill(page, "email", self.temp_email)
-            if email_field:
-                await email_field.fill(self.temp_email)
-
-            name_field = await self._find_and_fill(page, "name", "Butter Cloud")
-            if name_field:
-                await name_field.fill("Butter Cloud")
-
-            pass_field = await self._find_and_fill(page, "password", "ShadowCloud#2026!")
-            if pass_field:
-                await pass_field.fill("ShadowCloud#2026!")
-
-            submit_btn = await page.query_selector("button[type='submit'], button:has-text('Sign Up'), button:has-text('Create'), button:has-text('Continue')")
-            if submit_btn and await submit_btn.is_visible():
-                await submit_btn.click()
-                logger.info("🚀 Form submitted.")
-            else:
-                if pass_field:
-                    await pass_field.press("Enter")
-                elif email_field:
-                    await email_field.press("Enter")
-
-            await self._screenshot(page, "after-submit")
-
-            # --- 3. POLL TEMP-MAIL FOR VERIFICATION ---
-            logger.info("⏳ Polling for verification email...")
-            verification_found = False
-            for attempt in range(25):
-                await asyncio.sleep(6)
-                await page.reload(wait_until='networkidle')
-                content = await page.content()
-
-                links = re.findall(r'href="(https?://[^"]*)"', content)
-                for link in links:
-                    if self.target_name.lower() in link.lower() or 'verify' in link.lower() or 'confirm' in link.lower():
-                        self.verification_link = link
-                        verification_found = True
-                        logger.info(f"🔗 Verification link: {link[:100]}...")
-                        break
-                if verification_found:
-                    break
-
-                codes = re.findall(r'\b(\d{5,7})\b', content)
-                for code in codes:
-                    if len(code) >= 5:
-                        self.verification_code = code
-                        verification_found = True
-                        logger.info(f"🔢 Verification code: {code}")
-                        break
-                if verification_found:
-                    break
-
-                code_ctx = re.findall(r'code[:\s]+(\d{4,8})', content, re.IGNORECASE)
-                if code_ctx:
-                    self.verification_code = code_ctx[0]
-                    verification_found = True
-                    break
-
-                logger.info(f"⏳ Poll {attempt+1}/25 – waiting...")
-                await self._screenshot(page, f"poll-{attempt}")
-
-            if not verification_found:
-                logger.warning("⚠️ No verification found – saving final state.")
-                await self._screenshot(page, "final-state")
-                with open("final_page.html", "w", encoding="utf-8") as f:
-                    f.write(await page.content())
-
-            if self.verification_link:
-                logger.info("🌐 Navigating to verification link...")
-                await page.goto(self.verification_link, wait_until='networkidle', timeout=60000)
-                await self._screenshot(page, "verified")
-                logger.info("✅ Verification completed successfully.")
-            elif self.verification_code:
-                code_input = await self._find_field(page, "code")
-                if code_input:
-                    await code_input.fill(self.verification_code)
-                    confirm = await page.query_selector("button:has-text('Verify'), button:has-text('Confirm')")
-                    if confirm:
-                        await confirm.click()
-                        await self._screenshot(page, "code-submitted")
-                        logger.info("✅ Code submitted.")
-            else:
-                logger.info("ℹ️ No explicit verification step – account may already be active.")
-
-            logger.info("🏁 Automation finished. Saving artifacts.")
+            # Final screenshot and close
             await self._screenshot(page, "done")
             await browser.close()
+            logger.info(f"🏁 Completed {len(self.credentials)} accounts.")
 
+    # Helper methods (same as before)
     async def _find_and_fill(self, page, field_type, value):
         base = f"input[type='{field_type}'], input[name*='{field_type}'], input[id*='{field_type}'], input[placeholder*='{field_type}']"
         try:
@@ -251,7 +238,7 @@ class CloudAutomator:
             timestamp = datetime.now().strftime("%H%M%S")
             filename = f"{self.screenshot_dir}/{name}_{timestamp}.png"
             await page.screenshot(path=filename, full_page=True)
-            logger.info(f"📸 Screenshot saved: {filename}")
+            logger.info(f"📸 Screenshot: {filename}")
         except Exception as e:
             logger.warning(f"Could not screenshot {name}: {e}")
 
@@ -260,7 +247,7 @@ async def main():
     try:
         await bot.run()
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        logger.error(f"❌ Fatal: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
